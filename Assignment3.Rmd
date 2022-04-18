@@ -1,0 +1,101 @@
+---
+title: "Assignment 3"
+output: pdf_document
+date: "`r Sys.Date()`"
+---
+I created an account in AWS and connect R server by using Public IPv4 address: 34.242.30.21.
+However, I am not able to use spark on R server. Therefore, as mentioned in the assignment, I download spark and java to use locally. The screenshot below shows the AWS information. 
+
+![](AWS_SC.png)
+
+```{r packages, warning=FALSE, message=FALSE}
+rm(list = ls())
+library(sparklyr)
+library(tidyverse)
+library(ggplot2)
+utils::sessionInfo()
+```
+
+In this project, we need to use spark to analyze data, here I connect to saprk and initialize it.
+
+```{r sc, warning=FALSE, message=FALSE}
+# spark_install()
+# when first
+#spark_install(version = "3.2.1")  
+sc <- spark_connect(master = "local")
+```
+
+Here, I read the data and then rename the irregular variable names. Then add the two datasets to saprk. The two data are then merged in spark, and the data is simply cleaned as needed.
+
+```{r cleaning, warning=FALSE, message=FALSE}
+# import data
+datafips=read.csv("UID_ISO_FIPS_LookUp_Table.csv")
+dataglb=read.csv("time_series_covid19_confirmed_global.csv")
+# rename
+dataglb <- rename(dataglb, c(Province_State = Province.State, 
+                             Country_Region = Country.Region))
+datafips <- rename(datafips, Long = Long_)
+# add the two datasets
+dataglb_tbl <- copy_to(sc, dataglb, "dataglb")
+datafips_tbl <- copy_to(sc, datafips, "datafips")
+
+# merge the data
+datajoin_tbl <- inner_join(dataglb_tbl, datafips_tbl, 
+                       by = c("Province_State", "Country_Region", "Lat", 'Long')) %>%
+  filter(Country_Region %in% c('Germany', 'China', 'Japan', 'United Kingdom', 
+                               'US', 'Brazil', 'Mexico')) %>%
+  pivot_longer(starts_with('X'), names_to = 'Date',  values_to = 'Cases') %>%
+  mutate(Date = regexp_replace(Date, 'X', ''),
+         Date = regexp_replace(Date, '_', '.')) 
+# datajoin_tbl$Date = as.Date(datajoin_tbl$Date, "%m_%d_%y")
+# summarise
+datajoin_tbl2 <- datajoin_tbl %>%
+  group_by(Country_Region, Date) %>%
+  summarise(Case = sum(Cases, na.rm = T),
+            Population = sum(Population, na.rm = T)) %>%
+  mutate(Rate = Case/Population*100000) %>%
+  filter(Case > 0) %>%
+  ungroup()
+```
+
+From the figure, it can be found that each country has a different growth trend of cumulative infections from January 2020 to January 2022. It can be seen from the figure that the country with the first cases is China, but the cumulative cases in China began to grow slowly at the end of March 2020, and began to grow rapidly in March 2022. For the rest of the countries, it started to grow rapidly in April 2020, and the growth rate has been maintained at a high level since then. From January 2021, among these countries, the United States will have the most infections and China the least.
+
+```{r fig1, warning=FALSE, message=FALSE, fig.cap='Cumulative infections for COVID-19',fig.align='center', fig.height=3, fig.width=7}
+ggplot(datajoin_tbl2, aes(x = as.Date(Date, "%m.%d.%y"), y = Case, col = Country_Region)) +
+  geom_line() +
+  theme_bw() +
+  theme(legend.position = 'top') +
+  labs(x = '') +
+  scale_y_log10()
+```
+
+Here, I plot the cumulative infection rate per 100,000 people in these countries. It can be seen from the figure that the United States has the highest infection rate until November 2021, after which the cumulative infection rate of the United Kingdom overtakes the United States. In late October 2021, the cumulative infection rate in Germany also showed a trend of increasing significantly. In contrast, China's cumulative infection rate has been the smallest. And it can be found in the middle picture that as of February 2022, the cumulative infection rate in the United Kingdom, the United States and Germany is 20,000 per 100,000 people, which means that nearly two in 10 people are infected with COVID-19.
+
+```{r fig2, warning=FALSE, message=FALSE,fig.align='center', fig.height=3, fig.width=7, fig.cap='Cumulative infections (per 100,000 people)'}
+ggplot(datajoin_tbl2, aes(x = as.Date(Date, "%m.%d.%y"), y = Rate, col = Country_Region)) +
+  geom_line() +
+  theme_bw() +
+  theme(legend.position = 'top') +
+  labs(x = '',y = 'Rate (per 100,000 people)')
+```
+
+The coefficient of Days is 0.0032, which shows that the cumulative number of people infected with COIVD is increasing by 0.32% per day. The coefficient of `log(Population)` is 1.11, which means that for every 1% increase in the population of an area, its cumulative number of infections will increase by about 1.11%. The coefficient of `Country_RegionChina` is -6.81, which implies that the cumulative number of infections in China is about 682% lower than in Brazil. The coefficient of `Country_RegionGermany` is -0.62, which implies that the cumulative number of infections in Germany is about 62% lower than in Brazil. The coefficient of `Country_RegionJapan` is -2.66, which implies that the cumulative number of infections in Japan is about 266% lower than in Brazil. The coefficient of `Country_RegionMexico` is -1.12, which implies that the cumulative number of infections in Mexico is about 112% lower than in Brazil. The coefficient of `Country_RegionUnited Kingdom` is 0.24, which implies that the cumulative number of infections in the UK is about 24% higher than in Brazil. The coefficient of `Country_RegionUS` is -0.07, which implies that the cumulative number of infections in the US is about 7% lower than in Brazil. 
+
+```{r mod2, warning=FALSE, message=FALSE}
+datajoin_tbl3 <- datajoin_tbl %>%
+  mutate(lcase = log(Cases),  # calculate the log
+         Date = to_date(Date, 'm.d.yy'),
+         Days = datediff(Date, '2019-12-31')) %>%
+  select(lcase, Days, Country_Region, Population)
+
+mod <-  lm(lcase ~ Country_Region + log(Population) + Days, data = datajoin_tbl3)
+coef(mod)
+```
+
+I execute the following error, so I choose lm function.
+
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+mod <- datajoin_tbl3 %>% 
+  ml_linear_regression(lcase~.)
+```
+
